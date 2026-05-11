@@ -1,0 +1,40 @@
+# Fly.io deployment config for the Wink liveness-gap demo.
+#
+# Picks a single small VM. mediapipe + opencv-python-headless + numpy at
+# runtime sit around ~300MB resident; 1GB gives comfortable headroom for
+# inbound frames. CPU is shared (the workload is bursty, not steady).
+#
+# auto_stop_machines = "stop" + min_machines_running = 0 means the VM
+# shuts down when idle (saves money) and restarts on the next inbound
+# request. Cold start is ~3-5s on Fly (versus ~50s on Render free tier).
+# If you want it always-warm, set min_machines_running = 1 and
+# auto_stop_machines = "off".
+
+app = "wink-image-demo"        # rename if this is taken: `fly apps list`
+primary_region = "sjc"         # change to your nearest: sjc, iad, lhr, fra, ... (sea is deprecated)
+
+[build]
+  # Dockerfile in the repo root. No buildpacks.
+
+# Fly does not auto-set $PORT — we have to declare it explicitly so server.py
+# binds 0.0.0.0:8080 (its "PORT env var present → cloud" rule kicks in).
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 25
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 1024

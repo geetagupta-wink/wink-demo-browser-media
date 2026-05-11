@@ -1,0 +1,1865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wink Liveness Gap Demo</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1080px; margin: 28px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 20px; }
+
+  /* Capture stage: centered, rounded, dark window. Aspect ratio is set
+     dynamically in JS once the camera stream's metadata is available, so
+     it matches the camera's native aspect — no crop, no letterbox bars,
+     no zoom regardless of whether the source is 16:9, 4:3, or other. */
+  #capture-stage {
+    position: relative;
+    width: min(1080px, 92vw);
+    aspect-ratio: 4 / 3;  /* fallback until camera metadata loads */
+    max-height: 78vh;     /* clamp on short viewports */
+    margin: 8px auto 12px;
+    border-radius: 24px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.18);
+  }
+  #capture-stage video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block; background: #000;
+  }
+  .stage-title {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 2; pointer-events: none;
+    color: rgba(255,255,255,0.92); font-weight: 600; font-size: 14px;
+    background: rgba(0,0,0,0.45); padding: 6px 14px; border-radius: 999px;
+    letter-spacing: 0.02em;
+  }
+
+  .cam-info { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: #888; margin-top: 6px; text-align: center; }
+  .controls { margin: 16px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; }
+  button { padding: 10px 18px; font-size: 14px; border: 0; border-radius: 6px; color: white; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.gap { background: #c0392b; }
+  button.guarded { background: #1a8c3a; }
+  button.stacked { background: #6f3fa6; }
+  button.secondary { background: #555; }
+  button.verify {
+    background: linear-gradient(135deg, #7c46c1, #4a2378);
+    font-size: 16px; font-weight: 600;
+    padding: 14px 28px;
+    box-shadow: 0 6px 18px rgba(124, 70, 193, 0.35);
+  }
+  button.verify-wink-only {
+    background: linear-gradient(135deg, #ff8c4a, #c14a1c);
+    font-size: 16px; font-weight: 600;
+    padding: 14px 28px;
+    box-shadow: 0 6px 18px rgba(255, 107, 53, 0.32);
+  }
+  .verify-row { margin: 16px 0 8px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+  /* Top-right Fakecam controls. Pinned to viewport so they're always
+     reachable regardless of scroll. The Setup button is muted (one-time
+     action); the Launch button is louder (used every time). */
+  #fakecam-controls {
+    position: fixed; top: 12px; right: 12px; z-index: 1000;
+    display: flex; gap: 8px; align-items: center;
+  }
+  #fakecam-controls button {
+    padding: 8px 14px; font-size: 13px; font-weight: 600;
+    border-radius: 6px; cursor: pointer; border: 0;
+  }
+  #fakecam-controls button.setup {
+    background: rgba(255,255,255,0.92);
+    color: #4a2378;
+    border: 1px solid rgba(124, 70, 193, 0.35);
+  }
+  #fakecam-controls button.launch {
+    background: linear-gradient(135deg, #c0392b, #862014);
+    color: white;
+    box-shadow: 0 4px 12px rgba(192, 57, 43, 0.35);
+  }
+  #fakecam-controls button:hover { filter: brightness(1.06); }
+  #fakecam-controls .os-badge {
+    font-size: 11px; color: #888; margin-right: 4px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  #fakecam-help {
+    display: none;
+    position: fixed; top: 56px; right: 12px; z-index: 1000;
+    background: white; border: 1px solid #e0d4f0; border-radius: 8px;
+    padding: 14px 16px; max-width: 360px; font-size: 13px; line-height: 1.5;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.15);
+  }
+  #fakecam-help.shown { display: block; }
+  #fakecam-help h4 { margin: 0 0 8px; font-size: 14px; color: #4a2378; }
+  #fakecam-help ol { margin: 0; padding-left: 18px; }
+  #fakecam-help li { margin-bottom: 4px; }
+  #fakecam-help code { background: #f4f0fa; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  /* Modal overlay shown when user clicks Setup or Launch on macOS — we
+     can't bypass Sequoia's Gatekeeper for downloaded shell scripts, so
+     instead we show a copy-paste Terminal one-liner. */
+  #fakecam-modal-bg {
+    display: none;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    z-index: 2000; align-items: center; justify-content: center; padding: 20px;
+  }
+  #fakecam-modal-bg.shown { display: flex; }
+  #fakecam-modal {
+    background: white; border-radius: 10px; padding: 22px 26px; max-width: 560px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35); font-size: 14px; line-height: 1.55;
+  }
+  #fakecam-modal h3 { margin: 0 0 10px; font-size: 17px; color: #4a2378; }
+  #fakecam-modal .step { margin: 10px 0; }
+  #fakecam-modal .cmd {
+    display: flex; align-items: stretch; margin: 8px 0;
+    background: #1d1430; color: #fde9c9; border-radius: 6px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px;
+    overflow: hidden;
+  }
+  #fakecam-modal .cmd code {
+    flex: 1; padding: 10px 12px; word-break: break-all;
+    user-select: all; -webkit-user-select: all;
+  }
+  #fakecam-modal .cmd button {
+    background: #5c3398; color: white; border: 0; padding: 0 14px;
+    cursor: pointer; font-size: 12px; font-weight: 600; min-width: 64px;
+  }
+  #fakecam-modal .cmd button:hover { filter: brightness(1.1); }
+  #fakecam-modal .cmd button.copied { background: #1a8c3a; }
+  #fakecam-modal .modal-actions { margin-top: 16px; text-align: right; }
+  #fakecam-modal .modal-actions button {
+    background: #4a2378; color: white; border: 0; border-radius: 6px;
+    padding: 8px 18px; font-weight: 600; cursor: pointer;
+  }
+  #fakecam-modal .note { font-size: 12px; color: #777; margin-top: 6px; }
+  #elapsed-time {
+    font-size: 22px; font-weight: 800;
+    color: #6f3fa6;
+    text-align: left;
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    background: rgba(124, 70, 193, 0.06);
+    border-left: 4px solid #7c46c1;
+    border-radius: 4px;
+    display: none;
+  }
+  #elapsed-time.shown { display: block; }
+  #elapsed-time .label {
+    display: block;
+    font-size: 11px; font-weight: 600; color: #888;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 2px;
+  }
+  .dev-tools-toggle {
+    text-align: center; margin: 8px 0; font-size: 11px; color: #888;
+    user-select: none; cursor: pointer;
+  }
+  .dev-tools-toggle:hover { color: #555; }
+  .dev-tools { display: none; }
+  .dev-tools.shown { display: block; }
+
+  /* ─── Polished verify-flow overlays inside the capture stage ──── */
+  /* Bbox overlay: elliptical face cutout with tick-mark ring.
+     SVG-based, kept simple — visibility is unconditional when .shown. */
+  #bbox-overlay {
+    position: absolute; inset: 0; z-index: 7;
+    pointer-events: none; display: none;
+  }
+  #bbox-overlay.shown { display: block; }
+  #bbox-ellipse {
+    fill: none; stroke: #ffffff; stroke-width: 4;
+    filter: drop-shadow(0 0 12px rgba(255, 255, 255, 0.8));
+  }
+  #tick-marks line {
+    stroke: rgba(255,255,255,0.9); stroke-width: 2; stroke-linecap: round;
+  }
+
+  /* Mask overlay: nearly black except inside the elliptical face cutout */
+  #mask-overlay {
+    position: absolute; inset: 0; z-index: 4;
+    display: none; pointer-events: none;
+  }
+  #mask-overlay.shown { display: block; }
+  #mask-overlay rect.mask-fill {
+    fill: var(--mask-fill, rgba(0,0,0,0.96));
+    transition: fill 0.18s ease;
+  }
+
+  /* Status banner: the user-facing progress communicator during Stage B/C.
+     Stays pinned at the top of the capture stage, text updates through
+     phases, optional spinner appears for "in flight" states. */
+  #probe-banner {
+    position: absolute; top: 0; left: 0; right: 0;
+    z-index: 11; display: none;
+    background: rgba(0,0,0,0.96);
+    color: #fff;
+    font-size: 15px; font-weight: 700;
+    text-align: center; padding: 18px 16px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  #probe-banner.shown { display: flex; align-items: center; justify-content: center; gap: 14px; }
+  #probe-banner-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.28);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    display: none;
+    flex-shrink: 0;
+  }
+  #probe-banner.with-spinner #probe-banner-spinner { display: block; }
+
+  /* Wink-purple progress bar at the bottom of the capture stage. Fill
+     animates 0% → 33% → 66% → 100% as each probe slot completes. */
+  #probe-progress {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 11;
+    height: 36px; display: none; overflow: hidden;
+    background: rgba(0,0,0,0.85);
+  }
+  #probe-progress.shown { display: flex; align-items: center; justify-content: center; }
+  #probe-progress-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    width: 0%;
+    background: linear-gradient(135deg, #7c46c1, #b380e6);
+    transition: width 0.6s cubic-bezier(0.4, 0.0, 0.2, 1);
+  }
+  #probe-progress-label {
+    position: relative; z-index: 1;
+    color: white; font-size: 12px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
+
+  /* Top status banner inside the stage */
+  #top-message {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 8; display: none; pointer-events: none;
+    color: rgba(255,255,255,0.92);
+    background: rgba(0,0,0,0.55);
+    padding: 8px 18px; border-radius: 999px;
+    font-size: 13px; font-weight: 500;
+    text-align: center; max-width: 88%;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  #top-message.shown { display: block; }
+
+  /* Quality OK: small green-check badge positioned on the ellipse boundary
+     by JS (top/left set in setBboxFromRel) — sits like a "verified" mark. */
+  #quality-check {
+    position: absolute; z-index: 9; display: none;
+    transform: translate(-50%, -50%);
+    text-align: center;
+  }
+  #quality-check.shown { display: block; animation: fadeIn 0.3s ease-out; }
+  #quality-check .badge {
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: #19a23a;
+    box-shadow: 0 0 18px rgba(40, 200, 80, 0.55), 0 4px 14px rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto;
+  }
+  #quality-check .badge svg {
+    width: 30px; height: 30px;
+    stroke: white; stroke-width: 5; fill: none;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #quality-check .msg {
+    margin-top: 10px; color: white;
+    font-weight: 600; font-size: 12px;
+    letter-spacing: 0.04em;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.85);
+    white-space: nowrap;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  /* Matrix grid: 3 vertical thirds, clipped to elliptical face area */
+  #matrix-grid {
+    position: absolute; z-index: 6;
+    pointer-events: none; display: none;
+    flex-direction: column;
+    clip-path: ellipse(50% 50% at 50% 50%);
+    -webkit-clip-path: ellipse(50% 50% at 50% 50%);
+  }
+  #matrix-grid.shown { display: flex; }
+  .matrix-third {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    visibility: hidden;
+    /* Solid near-black background so face progressively hides as each third fills */
+    background: #000;
+    border: 1px solid rgba(0, 255, 127, 0.20);
+    color: #00ff7f;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 12px; line-height: 1.05;
+    text-shadow: 0 0 4px rgba(0, 255, 127, 0.65);
+    padding: 4px 6px;
+    word-break: break-all;
+  }
+  .matrix-third.filled {
+    visibility: visible;
+    animation: matrixIn 0.4s ease-out;
+  }
+  .matrix-third.failed {
+    visibility: visible;
+    background: rgba(80, 0, 0, 0.55);
+    border-color: rgba(255, 59, 48, 0.5);
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    color: transparent;
+  }
+  .matrix-third.failed::before {
+    content: '✕';
+    color: #ff3b30;
+    font-size: clamp(56px, 12vw, 96px);
+    font-weight: 800;
+    text-shadow: 0 0 18px rgba(255, 59, 48, 0.9);
+    animation: redXIn 0.35s ease-out;
+  }
+  @keyframes matrixIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes redXIn {
+    from { opacity: 0; transform: scale(0.6); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+
+  /* Sending spinner overlay (white) */
+  #sending-overlay {
+    position: absolute; inset: 0; z-index: 10;
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.97);
+  }
+  #sending-overlay.shown { display: flex; }
+  #sending-spinner {
+    width: 56px; height: 56px;
+    border: 4px solid #e7e7e7;
+    border-top-color: #6f3fa6;
+    border-radius: 50%;
+    animation: spin 0.85s linear infinite;
+  }
+  #sending-text {
+    margin-top: 18px; color: #333;
+    font-weight: 500; font-size: 14px;
+    letter-spacing: 0.02em;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Final verdict banner */
+  #final-overlay {
+    position: absolute; inset: 0; z-index: 11;
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; padding: 24px;
+  }
+  #final-overlay.shown { display: flex; animation: fadeUp 0.45s ease-out; }
+  #final-overlay.success { background: rgba(34, 130, 60, 0.97); }
+  #final-overlay.failure { background: rgba(170, 30, 30, 0.97); }
+  #final-overlay .glyph {
+    font-size: clamp(90px, 18vw, 130px);
+    color: white;
+    line-height: 1;
+    margin-bottom: 12px;
+    text-shadow: 0 4px 24px rgba(0,0,0,0.25);
+  }
+  #final-overlay .headline {
+    color: white;
+    font-weight: 700;
+    font-size: clamp(22px, 3.5vw, 32px);
+    letter-spacing: 0.02em;
+  }
+  #final-overlay .detail {
+    margin-top: 8px;
+    color: rgba(255,255,255,0.88);
+    font-size: 14px;
+  }
+  #final-overlay button.dismiss {
+    margin-top: 24px;
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.45);
+    color: white;
+    padding: 9px 22px; border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    cursor: pointer;
+  }
+
+  /* Probe overlay lives INSIDE the capture stage now — fills the stage
+     during the probe phase, with the sweep band animating across it.
+     Page background and the rest of the page UI are unchanged. */
+  #probe-overlay {
+    position: absolute; inset: 0; z-index: 5;
+    display: none;
+    /* Translucent dark veil — user can dimly see their face through it
+       while the bright color band sweeps over. Reflection physics
+       unaffected: the camera captures the actual user, the screen's
+       dominant light source remains the opaque band. */
+    background: rgba(8, 8, 8, 0.72);
+    overflow: hidden;
+  }
+  #probe-overlay.shown { display: block; }
+  #probe-band {
+    position: absolute;
+    box-shadow: 0 0 60px 30px rgba(255,255,255,0.20);
+    will-change: left, top;
+  }
+  #probe-overlay-label {
+    position: absolute;
+    top: 18px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.7); z-index: 6;
+    font: 500 11px -apple-system, sans-serif;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    pointer-events: none;
+  }
+  .result { margin-top: 20px; padding: 16px; border-radius: 8px; background: #f6f6f7; border: 1px solid #e5e5e5; }
+  .verdict { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  .pass { color: #1a8c3a; }
+  .fail { color: #c0392b; }
+  .neutral { color: #555; }
+  .row { display: flex; gap: 8px; font-size: 13px; padding: 3px 0; }
+  .row .label { color: #666; min-width: 170px; }
+  pre { background: #fff; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 11px; overflow-x: auto; max-height: 320px; margin: 12px 0 0; }
+  .grid { display: flex; gap: 16px; align-items: flex-start; }
+  .captured { width: 220px; flex-shrink: 0; }
+  .captured img { width: 100%; border-radius: 6px; background: #000; }
+  .captured-label { font-size: 11px; color: #888; margin-top: 4px; text-align: center; }
+  .section-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #888; margin: 16px 0 6px; }
+  .section-head:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+
+<!-- Top-right fakecam controls. Visible on every page load. Hidden on
+     mobile because Chrome dev flags don't apply there. -->
+<div id="fakecam-controls">
+  <span class="os-badge" id="fakecam-os-badge">detecting OS…</span>
+  <button id="setup-fakecam-btn" class="setup" title="One-time setup: installs ffmpeg + downloads sample video">⚙ Setup Fakecam</button>
+  <button id="launch-fakecam-btn" class="launch" title="Launches Chrome with fake camera streaming the sample video">▶ Launch Fakecam</button>
+</div>
+<!-- Copy-paste modal for both Setup (macOS curl|bash) and Launch (path
+     to local clean launcher). Replaces the old "download and dance with
+     Gatekeeper" flow. -->
+<div id="fakecam-modal-bg">
+  <div id="fakecam-modal">
+    <h3 id="fakecam-modal-title">Setup Fakecam</h3>
+    <div id="fakecam-modal-body"></div>
+    <div class="modal-actions">
+      <button id="fakecam-modal-close">Done</button>
+    </div>
+  </div>
+</div>
+
+<h1>Wink Liveness Gap Demo</h1>
+<div class="sub">getUserMedia → local Python proxy → Wink recognize-face (LivenessRequestMode=1). Two paths: <strong style="color:#c0392b">red</strong> = no rPPG (the gap), <strong style="color:#1a8c3a">green</strong> = quality-gated + rPPG-gated (the mitigation, mirrors Wink's MediaPipe pre-check).</div>
+
+<div id="capture-stage">
+  <div class="stage-title">Please center your face</div>
+  <div id="probe-banner">
+    <span id="probe-banner-text">Please hold still</span>
+    <span id="probe-banner-spinner"></span>
+  </div>
+  <div id="top-message"></div>
+  <video id="preview" autoplay playsinline muted></video>
+
+  <!-- Mask overlay: dark everywhere except inside the elliptical face cutout.
+       width/height attributes are explicit (SVGs default to 300x150 otherwise);
+       ellipse defaults match TARGET_BBOX_REL so something is visible even if
+       JS hasn't yet run setBboxFromRel. -->
+  <svg id="mask-overlay" width="100%" height="100%" preserveAspectRatio="none">
+    <defs>
+      <mask id="bbox-cutout-mask">
+        <rect x="0" y="0" width="100%" height="100%" fill="white" />
+        <ellipse id="bbox-cutout" cx="50%" cy="50%" rx="16%" ry="40%" fill="black" />
+      </mask>
+    </defs>
+    <rect class="mask-fill" x="0" y="0" width="100%" height="100%" mask="url(#bbox-cutout-mask)" />
+  </svg>
+
+  <!-- Bbox border: white ellipse + tick-mark ring around it -->
+  <svg id="bbox-overlay" width="100%" height="100%" preserveAspectRatio="none">
+    <ellipse id="bbox-ellipse" cx="50%" cy="50%" rx="16%" ry="40%" />
+    <g id="tick-marks"></g>
+  </svg>
+
+  <!-- Matrix grid: 3 vertical thirds, positioned to overlay the bbox area -->
+  <div id="matrix-grid">
+    <div class="matrix-third" data-third="0"></div>
+    <div class="matrix-third" data-third="1"></div>
+    <div class="matrix-third" data-third="2"></div>
+  </div>
+
+  <!-- Green-check badge for QUALITY_OK; positioned on the ellipse boundary by JS -->
+  <div id="quality-check">
+    <div class="badge">
+      <svg viewBox="0 0 32 32"><polyline points="8,17 14,23 24,10" /></svg>
+    </div>
+    <div class="msg">Face quality and light OK</div>
+  </div>
+
+  <!-- Existing probe overlay (sweep band) -->
+  <div id="probe-overlay">
+    <span id="probe-overlay-label">verifying…</span>
+    <div id="probe-band"></div>
+  </div>
+
+  <!-- Sending spinner (white) -->
+  <div id="sending-overlay">
+    <div id="sending-spinner"></div>
+    <div id="sending-text">Sending vectors to verify identity</div>
+  </div>
+
+  <!-- Wink-purple progress bar at the bottom of the stage; fills 33%/66%/100% as probes complete -->
+  <div id="probe-progress">
+    <div id="probe-progress-fill"></div>
+    <span id="probe-progress-label">Vectorizing face</span>
+  </div>
+
+  <!-- Final verdict banner -->
+  <div id="final-overlay">
+    <div class="glyph"></div>
+    <div class="headline"></div>
+    <div class="detail"></div>
+    <button class="dismiss">Try again</button>
+  </div>
+</div>
+<div class="cam-info" id="caminfo">camera: not started</div>
+
+<div class="verify-row">
+  <button id="verify-btn" class="verify">Verify Identity</button>
+  <button id="verify-wink-only-btn" class="verify-wink-only">Wink Only (no liveness probe)</button>
+</div>
+
+<div class="dev-tools-toggle" id="dev-tools-toggle">▸ show diagnostic flows</div>
+<div class="dev-tools" id="dev-tools">
+  <div class="controls">
+    <button id="capture-gap" class="gap">Capture &amp; submit (no rPPG)</button>
+    <button id="capture-guarded" class="guarded">Capture 10s + rPPG-gated</button>
+    <button id="capture-stacked" class="stacked">Capture + rPPG + screen probe</button>
+    <button id="restart" class="secondary">Restart camera</button>
+  </div>
+</div>
+
+<div id="result" class="result" style="display:none">
+  <div class="grid">
+    <div class="captured">
+      <img id="snap" alt="captured frame">
+      <div class="captured-label" id="snap-label">frame sent to Wink</div>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div id="elapsed-time"><span class="label"></span><span class="value"></span></div>
+      <div id="verdict" class="verdict"></div>
+      <div id="rppg-rows"></div>
+      <div id="wink-rows"></div>
+      <pre id="raw"></pre>
+    </div>
+  </div>
+</div>
+
+<canvas id="canvas" style="display:none"></canvas>
+
+<script>
+const video = document.getElementById('preview');
+const canvas = document.getElementById('canvas');
+const gapBtn = document.getElementById('capture-gap');
+const guardedBtn = document.getElementById('capture-guarded');
+const stackedBtn = document.getElementById('capture-stacked');
+const restartBtn = document.getElementById('restart');
+const resultEl = document.getElementById('result');
+const verdictEl = document.getElementById('verdict');
+const rppgRows = document.getElementById('rppg-rows');
+const winkRows = document.getElementById('wink-rows');
+const rawEl = document.getElementById('raw');
+const snapEl = document.getElementById('snap');
+const snapLabel = document.getElementById('snap-label');
+const camInfo = document.getElementById('caminfo');
+const overlay = document.getElementById('probe-overlay');
+const overlayLabel = document.getElementById('probe-overlay-label');
+const probeBand = document.getElementById('probe-band');
+
+let stream = null;
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    const track = stream.getVideoTracks()[0];
+    const s = track.getSettings();
+    camInfo.textContent = `camera: "${track.label}" — ${s.width}x${s.height} @ ${s.frameRate || '?'}fps  deviceId=${(s.deviceId||'').slice(0,12)}…`;
+    // Match the capture stage's aspect ratio to whatever the camera reports
+    // so the feed fills it naturally — no crop, no letterbox bars.
+    const adoptAspect = () => {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (w && h) {
+        document.getElementById('capture-stage').style.aspectRatio = `${w} / ${h}`;
+      }
+    };
+    if (video.videoWidth) adoptAspect();
+    else video.addEventListener('loadedmetadata', adoptAspect, { once: true });
+  } catch (e) {
+    camInfo.textContent = 'camera error: ' + e.message;
+    alert('Camera access failed: ' + e.message);
+  }
+}
+
+function row(label, value) {
+  return `<div class="row"><div class="label">${label}</div><div>${value}</div></div>`;
+}
+
+function snapCanvasJpeg() {
+  const w = video.videoWidth || 1280;
+  const h = video.videoHeight || 720;
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+  return new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+}
+
+// ── Path A: gap demo (single frame, no rPPG) ─────────────────────────
+async function captureGap() {
+  gapBtn.disabled = true;
+  guardedBtn.disabled = true;
+  gapBtn.textContent = 'Submitting…';
+  try {
+    const blob = await snapCanvasJpeg();
+    snapEl.src = URL.createObjectURL(blob);
+    snapLabel.textContent = 'frame sent to Wink';
+    const fd = new FormData();
+    fd.append('image', blob, 'selfie.jpg');
+    const resp = await fetch('/api/recognize', { method: 'POST', body: fd });
+    const data = await resp.json();
+    renderGapResult(data);
+  } catch (e) {
+    renderError(e.message);
+  } finally {
+    gapBtn.disabled = false;
+    guardedBtn.disabled = false;
+    gapBtn.textContent = 'Capture & submit (no rPPG)';
+  }
+}
+
+function renderGapResult(data) {
+  resultEl.style.display = 'block';
+  rawEl.textContent = JSON.stringify(data, null, 2);
+
+  const fr = (data.wink || {}).faceResponse || {};
+  const livenessPass = fr.livenessPass;
+
+  if (livenessPass === true) {
+    verdictEl.innerHTML = '<span class="fail">GAP DEMONSTRATED</span> — Wink livenessPass = true (the frame would have been accepted)';
+  } else if (livenessPass === false) {
+    verdictEl.innerHTML = '<span class="pass">Wink rejected the frame</span> — livenessPass = false';
+  } else {
+    verdictEl.innerHTML = '<span class="neutral">' + (data.error || 'no verdict') + '</span>';
+  }
+
+  rppgRows.innerHTML = '';
+  winkRows.innerHTML = winkRowsHtml(data);
+}
+
+// ── Path B: rPPG-gated capture (10s video, server-side analysis) ─────
+async function captureGuarded() {
+  gapBtn.disabled = true;
+  guardedBtn.disabled = true;
+  try {
+    if (!window.MediaRecorder) throw new Error('MediaRecorder API not available in this browser');
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm');
+    const recorder = new MediaRecorder(stream, { mimeType: mime });
+    const chunks = [];
+    recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(r => recorder.onstop = r);
+    recorder.start();
+
+    for (let i = 10; i > 0; i--) {
+      guardedBtn.textContent = `Recording… ${i}s`;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    recorder.stop();
+    await stopped;
+
+    guardedBtn.textContent = 'Analyzing rPPG…';
+    const videoBlob = new Blob(chunks, { type: 'video/webm' });
+    const stillBlob = await snapCanvasJpeg();
+    snapEl.src = URL.createObjectURL(stillBlob);
+    snapLabel.textContent = 'last frame seen by browser';
+
+    const fd = new FormData();
+    fd.append('video', videoBlob, 'capture.webm');
+    const resp = await fetch('/api/recognize-with-rppg', { method: 'POST', body: fd });
+    const data = await resp.json();
+    renderGuardedResult(data);
+  } catch (e) {
+    renderError(e.message);
+  } finally {
+    gapBtn.disabled = false;
+    guardedBtn.disabled = false;
+    guardedBtn.textContent = 'Capture 10s + rPPG-gated';
+  }
+}
+
+function renderGuardedResult(data) {
+  resultEl.style.display = 'block';
+  rawEl.textContent = JSON.stringify(data, null, 2);
+
+  const quality = data.quality || {};
+  const rppg = data.rppg;
+  const winkCalled = data.wink_called === true;
+  const fr = (data.wink || {}).faceResponse || {};
+  const livenessPass = fr.livenessPass;
+  const verdict = data.verdict;
+
+  // Top-line verdict
+  if (verdict === 'QUALITY_GATE_FAILED') {
+    verdictEl.innerHTML = '<span class="neutral">IMPROVE CAPTURE</span> — face quality gate failed (mirrors Wink\'s pre-check)';
+  } else if (verdict === 'BLOCKED_BY_RPPG') {
+    verdictEl.innerHTML = '<span class="pass">BLOCKED BY rPPG</span> — quality OK but no pulse signal; Wink was never called';
+  } else if (winkCalled && livenessPass === true) {
+    verdictEl.innerHTML = '<span class="pass">PASS</span> — quality OK, pulse detected, Wink livenessPass = true';
+  } else if (winkCalled && livenessPass === false) {
+    verdictEl.innerHTML = '<span class="fail">Wink rejected (after our gates passed)</span>';
+  } else {
+    verdictEl.innerHTML = '<span class="neutral">' + (data.error || verdict || 'unknown') + '</span>';
+  }
+
+  // Stage A — face quality
+  rppgRows.innerHTML = '<div class="section-head">Stage A — face quality (MediaPipe)</div>';
+  rppgRows.innerHTML += row('verdict', quality.pass ? 'PASS' : 'FAIL');
+  if (quality.frames_decoded !== undefined)         rppgRows.innerHTML += row('frames decoded', quality.frames_decoded);
+  if (quality.frames_with_face !== undefined)       rppgRows.innerHTML += row('frames with face', quality.frames_with_face);
+  if (quality.detection_rate !== undefined)         rppgRows.innerHTML += row('detection rate', quality.detection_rate);
+  if (quality.mean_brightness !== undefined)        rppgRows.innerHTML += row('mean brightness (V/255)', quality.mean_brightness);
+  if (quality.mean_face_frac !== undefined)         rppgRows.innerHTML += row('mean face fraction', quality.mean_face_frac);
+  if (quality.mean_detection_score !== undefined)   rppgRows.innerHTML += row('mean detection score', quality.mean_detection_score);
+  if (quality.reason)                               rppgRows.innerHTML += row('fail reason', quality.reason);
+
+  // Stage B — rPPG (skipped if A failed)
+  rppgRows.innerHTML += '<div class="section-head">Stage B — rPPG (skipped if A failed)</div>';
+  if (!rppg) {
+    rppgRows.innerHTML += row('verdict', 'NOT RUN');
+  } else {
+    rppgRows.innerHTML += row('verdict', rppg.pass ? 'PASS' : 'FAIL');
+    if (rppg.bpm !== undefined)                rppgRows.innerHTML += row('detected BPM', rppg.bpm);
+    if (rppg.green_pre_std !== undefined)      rppgRows.innerHTML += row('green pre-detrend std', rppg.green_pre_std);
+    if (rppg.green_detrend_std !== undefined)  rppgRows.innerHTML += row('green detrend std', rppg.green_detrend_std);
+    if (rppg.green_bandpass_rms !== undefined) rppgRows.innerHTML += row('green bandpass RMS', rppg.green_bandpass_rms);
+    if (rppg.frames_analyzed !== undefined)    rppgRows.innerHTML += row('frames analyzed', rppg.frames_analyzed);
+    if (rppg.fps !== undefined)                rppgRows.innerHTML += row('decoded fps', rppg.fps);
+    if (rppg.reason)                           rppgRows.innerHTML += row('fail reason', rppg.reason);
+  }
+
+  // Stage C — Wink (only if both A and B passed)
+  if (winkCalled) {
+    winkRows.innerHTML = '<div class="section-head">Stage C — Wink (only called when A and B both pass)</div>' + winkRowsHtml(data);
+  } else {
+    winkRows.innerHTML = '<div class="section-head">Stage C — Wink</div>' + row('called?', 'no — short-circuited');
+  }
+}
+
+function winkRowsHtml(data) {
+  const fr = (data.wink || {}).faceResponse || {};
+  const wink = data.wink || {};
+  let html = '';
+  if (fr.livenessPass !== undefined)        html += row('livenessPass', String(fr.livenessPass));
+  if (fr.livenessRealScore !== undefined)   html += row('livenessRealScore', fr.livenessRealScore);
+  if (fr.faceConfidence !== undefined)      html += row('faceConfidence', fr.faceConfidence);
+  if (fr.videoProcessingResult)             html += row('videoProcessingResult', fr.videoProcessingResult);
+  if (wink.message)                         html += row('wink message', wink.message);
+  if (data.http_status)                     html += row('wink http status', data.http_status);
+  if (data.session_id)                      html += row('session id', data.session_id);
+  return html;
+}
+
+function renderError(msg) {
+  resultEl.style.display = 'block';
+  verdictEl.innerHTML = '<span class="fail">ERROR</span> — ' + msg;
+  rppgRows.innerHTML = '';
+  winkRows.innerHTML = '';
+  rawEl.textContent = '';
+}
+
+// ── Path C: stacked rPPG + screen probe ─────────────────────────────
+async function captureStacked() {
+  gapBtn.disabled = true;
+  guardedBtn.disabled = true;
+  stackedBtn.disabled = true;
+  try {
+    if (!window.MediaRecorder) throw new Error('MediaRecorder API not available');
+
+    stackedBtn.textContent = 'Requesting challenge…';
+    const challenge = await fetch('/api/probe-challenge', { method: 'POST' }).then(r => r.json());
+
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9'
+              : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm');
+    const recorder = new MediaRecorder(stream, { mimeType: mime });
+    const chunks = [];
+    recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(r => recorder.onstop = r);
+
+    const recStart = performance.now();
+    recorder.start();
+    const phases = [];
+
+    // 1. Brief camera warm-up before the probe — no rPPG step in this path
+    stackedBtn.textContent = 'Starting capture…';
+    await new Promise(r => setTimeout(r, challenge.prefix_ms));
+
+    // 2. Show probe stage with band hidden initially. Page background goes
+    //    dark behind the stage; the bright band is the only light source.
+    const colorMap = { R: '#ff2828', G: '#28ff28', B: '#2828ff' };
+    overlay.classList.add('shown');
+    overlayLabel.textContent = 'verifying…';
+    probeBand.style.background = 'transparent';
+    probeBand.style.left = '-9999px';
+    probeBand.style.top = '-9999px';
+
+    // Initial baseline window (overlay shown but band hidden = mostly dark
+    // screen). Skin baseline measured from this.
+    let phaseStart = performance.now() - recStart;
+    await new Promise(r => setTimeout(r, challenge.baseline_ms));
+    phases.push({ kind: 'baseline_pre', color: 'gray', start: phaseStart, end: performance.now() - recStart });
+
+    // 3. Run sweep sequence. Each slot: bright color band sweeps across the
+    //    overlay in a server-chosen direction.
+    for (const slot of challenge.sequence) {
+      const { color: c, render } = slot;
+      // Full-fill mode: surround flashes the slot's color via the mask CSS variable.
+      const fillColor = render || colorMap[c];
+      document.documentElement.style.setProperty('--mask-fill', fillColor);
+
+      const slotStart = performance.now() - recStart;
+      await new Promise(r => setTimeout(r, challenge.slot_ms));
+      phases.push({ kind: 'flash', color: c, start: slotStart, end: performance.now() - recStart });
+
+      // Baseline: surround back to dark
+      document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+      const baseStart = performance.now() - recStart;
+      await new Promise(r => setTimeout(r, challenge.baseline_ms));
+      phases.push({ kind: 'baseline', color: 'gray', start: baseStart, end: performance.now() - recStart });
+    }
+
+    // 4. Hide overlay, post buffer, stop recording
+    overlay.classList.remove('shown');
+    await new Promise(r => setTimeout(r, challenge.post_buffer_ms || 200));
+    recorder.stop();
+    await stopped;
+
+    // 5. Snapshot last preview frame for the result thumbnail
+    const stillBlob = await snapCanvasJpeg();
+    snapEl.src = URL.createObjectURL(stillBlob);
+    snapLabel.textContent = 'last frame seen by browser';
+
+    // 6. Upload
+    stackedBtn.textContent = 'Analyzing…';
+    const fd = new FormData();
+    fd.append('video', new Blob(chunks, { type: 'video/webm' }), 'capture.webm');
+    fd.append('phases', JSON.stringify(phases));
+    fd.append('sequence', JSON.stringify(challenge.sequence));
+    const resp = await fetch('/api/recognize-with-probe', { method: 'POST', body: fd });
+    const data = await resp.json();
+    renderStackedResult(data);
+  } catch (e) {
+    overlay.style.display = 'none';
+    renderError(e.message);
+  } finally {
+    gapBtn.disabled = false;
+    guardedBtn.disabled = false;
+    stackedBtn.disabled = false;
+    stackedBtn.textContent = 'Capture + rPPG + screen probe';
+  }
+}
+
+function renderStackedResult(data) {
+  resultEl.style.display = 'block';
+  rawEl.textContent = JSON.stringify(data, null, 2);
+
+  const quality = data.quality || {};
+  const rppg = data.rppg;
+  const probe = data.probe;
+  const winkCalled = data.wink_called === true;
+  const fr = (data.wink || {}).faceResponse || {};
+  const livenessPass = fr.livenessPass;
+  const verdict = data.verdict;
+
+  if (verdict === 'QUALITY_GATE_FAILED') {
+    verdictEl.innerHTML = '<span class="neutral">IMPROVE CAPTURE</span> — face quality gate failed';
+  } else if (verdict === 'BLOCKED_BY_SCREEN_PROBE') {
+    verdictEl.innerHTML = '<span class="pass">BLOCKED BY SCREEN PROBE</span> — flash reflections missing or wrong; Wink never called';
+  } else if (winkCalled && livenessPass === true) {
+    verdictEl.innerHTML = '<span class="pass">PASS</span> — quality OK, screen reflections verified, Wink livenessPass = true';
+  } else if (winkCalled && livenessPass === false) {
+    verdictEl.innerHTML = '<span class="fail">Wink rejected (after our gates passed)</span>';
+  } else {
+    verdictEl.innerHTML = '<span class="neutral">' + (data.error || verdict || 'unknown') + '</span>';
+  }
+
+  rppgRows.innerHTML = '<div class="section-head">Stage A — face quality (MediaPipe)</div>';
+  rppgRows.innerHTML += row('verdict', quality.pass ? 'PASS' : 'FAIL');
+  if (quality.frames_decoded !== undefined)         rppgRows.innerHTML += row('frames decoded', quality.frames_decoded);
+  if (quality.detection_rate !== undefined)         rppgRows.innerHTML += row('detection rate', quality.detection_rate);
+  if (quality.mean_brightness !== undefined)        rppgRows.innerHTML += row('mean brightness (V/255)', quality.mean_brightness);
+  if (quality.mean_face_frac !== undefined)         rppgRows.innerHTML += row('mean face fraction', quality.mean_face_frac);
+  if (quality.mean_detection_score !== undefined)   rppgRows.innerHTML += row('mean detection score', quality.mean_detection_score);
+  if (quality.reason)                               rppgRows.innerHTML += row('fail reason', quality.reason);
+
+  rppgRows.innerHTML += '<div class="section-head">Stage B — sweep probe (server-randomized color + direction)</div>';
+  if (!probe) {
+    rppgRows.innerHTML += row('verdict', 'NOT RUN');
+  } else {
+    rppgRows.innerHTML += row('verdict', probe.pass ? 'PASS' : 'FAIL');
+    const seqText = (probe.sequence || []).map(s =>
+      typeof s === 'object' ? `${s.color}-${s.position || s.direction}` : s
+    ).join(' → ');
+    rppgRows.innerHTML += row('challenge sequence', seqText);
+    (probe.flashes || []).forEach((f, i) => {
+      const passing = f.is_pass !== undefined ? f.is_pass : f.is_dominant;
+      const ok = passing ? '✓' : '✗';
+      const cMark = f.color_dominant ? '✓' : '✗';
+      const sMark = f.direction_correct ? '✓' : '✗';
+      const colorPart = f.delta_BGR
+        ? `color ${cMark} (Δ=${f.expected_channel_delta} vs other-max ${f.max_other_channel_delta})`
+        : `color ${cMark}`;
+      const posLabel = f.position || f.direction || '?';
+      const spatialPart = (f.asymmetry != null)
+        ? `pos ${sMark} (asym=${f.asymmetry}, L Δ=${f.left_delta_in_channel}, R Δ=${f.right_delta_in_channel})`
+        : `pos ${sMark}`;
+      const txt = `${ok} ${colorPart} | ${spatialPart}` + (f.reason ? ` [${f.reason}]` : '');
+      rppgRows.innerHTML += row(`flash ${i + 1} (${f.color}-${posLabel})`, txt);
+    });
+  }
+
+  if (winkCalled) {
+    winkRows.innerHTML = '<div class="section-head">Stage C — Wink (only when A and B both pass)</div>' + winkRowsHtml(data);
+  } else {
+    winkRows.innerHTML = '<div class="section-head">Stage C — Wink</div>' + row('called?', 'no — short-circuited');
+  }
+}
+
+gapBtn.addEventListener('click', captureGap);
+guardedBtn.addEventListener('click', captureGuarded);
+stackedBtn.addEventListener('click', captureStacked);
+restartBtn.addEventListener('click', startCamera);
+
+// ─── Verify-flow state machine (the polished UX path) ───────────────
+const verifyBtn          = document.getElementById('verify-btn');
+const verifyWinkOnlyBtn  = document.getElementById('verify-wink-only-btn');
+const elapsedTimeEl      = document.getElementById('elapsed-time');
+function showElapsedTime(ms, label) {
+  elapsedTimeEl.querySelector('.label').textContent = label;
+  elapsedTimeEl.querySelector('.value').textContent = `${ms} ms (${(ms/1000).toFixed(2)}s)`;
+  elapsedTimeEl.classList.add('shown');
+}
+function clearElapsedTime() {
+  elapsedTimeEl.classList.remove('shown');
+}
+const topMessage      = document.getElementById('top-message');
+const bboxOverlay     = document.getElementById('bbox-overlay');
+const bboxEllipse     = document.getElementById('bbox-ellipse');
+const tickMarksGroup  = document.getElementById('tick-marks');
+const maskOverlay     = document.getElementById('mask-overlay');
+const bboxCutout      = document.getElementById('bbox-cutout');
+const matrixGrid      = document.getElementById('matrix-grid');
+const matrixThirds    = matrixGrid.querySelectorAll('.matrix-third');
+const qualityCheckEl  = document.getElementById('quality-check');
+const sendingOverlay  = document.getElementById('sending-overlay');
+const finalOverlay    = document.getElementById('final-overlay');
+const finalGlyph      = finalOverlay.querySelector('.glyph');
+const finalHeadline   = finalOverlay.querySelector('.headline');
+const finalDetail     = finalOverlay.querySelector('.detail');
+const finalDismiss    = finalOverlay.querySelector('.dismiss');
+const stageTitle      = document.querySelector('.stage-title');
+const captureStageEl  = document.getElementById('capture-stage');
+const probeBanner     = document.getElementById('probe-banner');
+const probeBannerText = document.getElementById('probe-banner-text');
+const probeProgress       = document.getElementById('probe-progress');
+const probeProgressFill   = document.getElementById('probe-progress-fill');
+const probeProgressLabel  = document.getElementById('probe-progress-label');
+function setProbeBanner(text, withSpinner = false) {
+  probeBannerText.textContent = text;
+  probeBanner.classList.toggle('with-spinner', !!withSpinner);
+}
+function setProbeProgress(pct, label) {
+  probeProgressFill.style.width = pct + '%';
+  probeProgressLabel.textContent = label;
+}
+
+const MATRIX_CHARS =
+  'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン' +
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*+=<>?!|/\\';
+function randomMatrixBlock(rows = 16, cols = 18) {
+  const out = [];
+  for (let r = 0; r < rows; r++) {
+    let line = '';
+    for (let c = 0; c < cols; c++) {
+      line += MATRIX_CHARS[Math.floor(Math.random() * MATRIX_CHARS.length)];
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── Client-side probe sampling + analysis ──────────────────────────
+// Eliminates the video upload + server MediaPipe path. We sample the
+// face skin sub-regions directly from the live <video> element via canvas
+// at ~30fps during the probe, then run the same color-dominance analysis
+// the server used to do — all in JS, all instant.
+const probeSampleCanvas = document.createElement('canvas');
+const probeSampleCtx = probeSampleCanvas.getContext('2d', { willReadFrequently: true });
+let probeSamples = [];
+let probeSamplingActive = false;
+let probeSamplingStart = 0;
+let probeSampleTimer = null;
+
+function startProbeSampling() {
+  probeSamples = [];
+  probeSamplingActive = true;
+  probeSamplingStart = performance.now();
+  scheduleProbeSample();
+}
+function stopProbeSampling() {
+  probeSamplingActive = false;
+  if (probeSampleTimer) { clearTimeout(probeSampleTimer); probeSampleTimer = null; }
+}
+function scheduleProbeSample() {
+  if (!probeSamplingActive) return;
+  if (verifyBbox && video.videoWidth > 0 && video.videoHeight > 0) {
+    const W = video.videoWidth, H = video.videoHeight;
+    if (probeSampleCanvas.width !== W) probeSampleCanvas.width = W;
+    if (probeSampleCanvas.height !== H) probeSampleCanvas.height = H;
+    probeSampleCtx.drawImage(video, 0, 0, W, H);
+
+    const bx = Math.max(0, Math.round(verifyBbox.x * W));
+    const by = Math.max(0, Math.round(verifyBbox.y * H));
+    const bw = Math.min(W - bx, Math.round(verifyBbox.w * W));
+    const bh = Math.min(H - by, Math.round(verifyBbox.h * H));
+
+    if (bw > 0 && bh > 0) {
+      // Sub-region geometry mirrors what the server-side analyzer used to do.
+      const skin  = sampleSkinRegion(bx + Math.round(0.20 * bw), by + Math.round(0.05 * bh),
+                                     Math.round(0.60 * bw), Math.round(0.40 * bh));
+      const left  = sampleSkinRegion(bx + Math.round(0.10 * bw), by + Math.round(0.10 * bh),
+                                     Math.round(0.35 * bw), Math.round(0.40 * bh));
+      const right = sampleSkinRegion(bx + Math.round(0.55 * bw), by + Math.round(0.10 * bh),
+                                     Math.round(0.35 * bw), Math.round(0.40 * bh));
+      probeSamples.push({ time_ms: performance.now() - probeSamplingStart, skin, left, right });
+    }
+  }
+  probeSampleTimer = setTimeout(scheduleProbeSample, 33);  // ~30 samples/sec
+}
+
+function sampleSkinRegion(x, y, w, h) {
+  const W = probeSampleCanvas.width, H = probeSampleCanvas.height;
+  x = Math.max(0, x); y = Math.max(0, y);
+  w = Math.min(w, W - x); h = Math.min(h, H - y);
+  if (w <= 0 || h <= 0) return null;
+  const data = probeSampleCtx.getImageData(x, y, w, h).data;
+  let r = 0, g = 0, b = 0;
+  const px = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    r += data[i]; g += data[i + 1]; b += data[i + 2];
+  }
+  return [b / px, g / px, r / px];  // [B, G, R] to match server-side ordering
+}
+
+// Match the server's WINK_COLORS palette. Channel index is the BGR slot
+// where the slot color's reflection should appear.
+const CLIENT_COLOR_CHANNEL = {
+  ORANGE: 2, RED: 2, GREEN: 1,
+  R: 2, G: 1, B: 0,
+};
+
+function clientProbeVerdict(samples, phases, sequence) {
+  // PROBE_DELTA_MIN is effectively disabled — the camera's auto-exposure can
+  // drop all channels when the surround flashes bright, so the absolute sign
+  // of the delta is unreliable. Only the dominance margin (expected vs
+  // next-best channel) is a robust discriminator: real cam has consistent
+  // positive margins, recordings have ~0 or negative.
+  const PROBE_DELTA_MIN = -1000.0;
+  // 0.4 (down from 0.7) accommodates environments where overall reflection
+  // signal is weak (e.g., bright ambient room light, distant face, aggressive
+  // auto-WB). Recordings still fail because their margins are systematically
+  // ≤0 — they can't manufacture a 2/3 majority above 0.4.
+  const PROBE_DOMINANCE_MARGIN = 0.3;
+  // In full-fill mode the entire surround flashes one color, so both sides
+  // of the face should reflect the color *equally* — low asymmetry is the
+  // correct behavior, high asymmetry indicates non-uniform lighting or
+  // motion. (The old high-asym-passes semantics was a holdover from the
+  // earlier sweep-band design where the colored band moved across.) A
+  // generous ceiling tolerates the occasional non-uniform real-cam slot
+  // without flagging it.
+  const ASYMMETRY_MAX = 2.0;
+  const inPhase = (phase) => samples.filter(s => phase.start <= s.time_ms && s.time_ms < phase.end);
+  const mean3 = (arr, key) => {
+    let n = 0, b = 0, g = 0, r = 0;
+    for (const s of arr) if (s[key]) { b += s[key][0]; g += s[key][1]; r += s[key][2]; n++; }
+    return n ? [b / n, g / n, r / n] : null;
+  };
+
+  const flashResults = [];
+  for (let i = 0; i < phases.length; i++) {
+    const p = phases[i];
+    if (p.kind !== 'flash') continue;
+    let baseIdx = i - 1;
+    while (baseIdx >= 0 && phases[baseIdx].kind !== 'baseline_pre' && phases[baseIdx].kind !== 'baseline') baseIdx--;
+    if (baseIdx < 0) continue;
+    const flashSamples = inPhase(p);
+    const baseSamples = inPhase(phases[baseIdx]);
+
+    const flashSkin = mean3(flashSamples, 'skin');
+    const baseSkin  = mean3(baseSamples, 'skin');
+    const ch = CLIENT_COLOR_CHANNEL[p.color];
+    if (!flashSkin || !baseSkin || ch === undefined) {
+      flashResults.push({ color: p.color, color_dominant: false, is_pass: false, reason: 'no data' });
+      continue;
+    }
+    const delta = [flashSkin[0] - baseSkin[0], flashSkin[1] - baseSkin[1], flashSkin[2] - baseSkin[2]];
+    const expectedDelta = delta[ch];
+    const otherMax = Math.max(...delta.filter((_, j) => j !== ch));
+    const colorDominant = expectedDelta >= PROBE_DELTA_MIN &&
+                          (expectedDelta - otherMax) >= PROBE_DOMINANCE_MARGIN;
+
+    const fL = mean3(flashSamples, 'left'),  fR = mean3(flashSamples, 'right');
+    const bL = mean3(baseSamples,  'left'),  bR = mean3(baseSamples,  'right');
+    let lDelta = null, rDelta = null, asym = null, dirOk = false;
+    if (fL && fR && bL && bR) {
+      lDelta = fL[ch] - bL[ch];
+      rDelta = fR[ch] - bR[ch];
+      asym = Math.abs(lDelta - rDelta);
+      dirOk = asym <= ASYMMETRY_MAX;  // pass when L and R reflected the flash uniformly
+    }
+    flashResults.push({
+      color: p.color,
+      delta_BGR: delta.map(d => Math.round(d * 100) / 100),
+      expected_channel_delta: Math.round(expectedDelta * 100) / 100,
+      max_other_channel_delta: Math.round(otherMax * 100) / 100,
+      color_dominant: colorDominant,
+      left_delta_in_channel: lDelta != null ? Math.round(lDelta * 100) / 100 : null,
+      right_delta_in_channel: rDelta != null ? Math.round(rDelta * 100) / 100 : null,
+      asymmetry: asym != null ? Math.round(asym * 100) / 100 : null,
+      direction_correct: dirOk,
+      is_pass: colorDominant,
+    });
+  }
+  const expectedCount = phases.filter(p => p.kind === 'flash').length;
+  const colorPasses = flashResults.filter(r => r.color_dominant).length;
+  // Gate: with 2 slots, both must pass (majority of 2 = 2). With 3+ slots,
+  // tolerate one failure to absorb camera-adaptation drift on later slots.
+  const MAX_COLOR_FAILURES = expectedCount >= 3 ? 1 : 0;
+  return {
+    pass: flashResults.length === expectedCount &&
+          expectedCount === sequence.length &&
+          colorPasses >= Math.max(1, expectedCount - MAX_COLOR_FAILURES),
+    sequence,
+    flashes: flashResults,
+    color_pass_count: colorPasses,
+    thresholds: { delta_min: PROBE_DELTA_MIN, dominance_margin: PROBE_DOMINANCE_MARGIN },
+  };
+}
+
+// Stage A snapshot + padded bbox we hold for client-side Wink cropping later
+let verifySnapshot = null;
+let verifyBbox = null;
+
+// Fixed target ellipse for Stage A position guidance — relative coords
+// of the *camera frame* (not the stage). Aspect-corrected by
+// setBboxFromRel via the dynamic stage aspect-ratio.
+const TARGET_BBOX_REL = { x: 0.34, y: 0.10, w: 0.32, h: 0.80 };
+
+function computeGuidance(q) {
+  if (!q.tight_bbox) {
+    return { good: false, message: 'Show your face to the camera' };
+  }
+  const t = q.tight_bbox;
+  const faceCx = t.x + t.w / 2;
+  const faceCy = t.y + t.h / 2;
+  const targetCx = TARGET_BBOX_REL.x + TARGET_BBOX_REL.w / 2;
+  const targetCy = TARGET_BBOX_REL.y + TARGET_BBOX_REL.h / 2;
+  const dx = Math.abs(faceCx - targetCx);
+  const dy = Math.abs(faceCy - targetCy);
+  const ff = q.face_frac || (t.w * t.h);
+  if (ff < 0.10)  return { good: false, message: 'Move closer to the camera' };
+  if (ff > 0.22)  return { good: false, message: 'Move back from the camera' };
+  if (dx > 0.10 || dy > 0.12) return { good: false, message: 'Center your face in the circle' };
+  if (q.brightness !== undefined && q.brightness < 80) {
+    return { good: false, message: 'Need more light on your face' };
+  }
+  return { good: true, message: 'Hold still…' };
+}
+
+async function cropSnapshotWithBbox(snapBlob, bbox) {
+  // bbox is in 0..1 relative coords of the source image
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(snapBlob);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const sw = img.naturalWidth, sh = img.naturalHeight;
+      const cx = Math.max(0, Math.round(bbox.x * sw));
+      const cy = Math.max(0, Math.round(bbox.y * sh));
+      const cw = Math.min(sw - cx, Math.round(bbox.w * sw));
+      const ch = Math.min(sh - cy, Math.round(bbox.h * sh));
+      const c = document.createElement('canvas');
+      c.width = cw; c.height = ch;
+      c.getContext('2d').drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
+      c.toBlob(blob => blob ? resolve(blob) : reject(new Error('toBlob failed')), 'image/jpeg', 0.92);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('snapshot image failed to load')); };
+    img.src = url;
+  });
+}
+
+function setBboxFromRel(bbox) {
+  // bbox: { x, y, w, h } in relative 0..1 coords (already padded face+20% from server).
+  // Stage's aspect-ratio matches camera, so relative coords map directly.
+  const W = captureStageEl.clientWidth;
+  const H = captureStageEl.clientHeight;
+  const x = Math.max(0, bbox.x * W);
+  const y = Math.max(0, bbox.y * H);
+  const w = Math.min(W - x, bbox.w * W);
+  const h = Math.min(H - y, bbox.h * H);
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const rx = w / 2;
+  const ry = h / 2;
+
+  // Ellipse border + tick ring
+  bboxOverlay.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  bboxOverlay.style.width = W + 'px';
+  bboxOverlay.style.height = H + 'px';
+  bboxEllipse.setAttribute('cx', cx);
+  bboxEllipse.setAttribute('cy', cy);
+  bboxEllipse.setAttribute('rx', rx);
+  bboxEllipse.setAttribute('ry', ry);
+
+  // Tick marks: ~60 short radial lines around the ellipse perimeter
+  const ns = 'http://www.w3.org/2000/svg';
+  while (tickMarksGroup.firstChild) tickMarksGroup.removeChild(tickMarksGroup.firstChild);
+  const TICK_COUNT = 60;
+  const TICK_LEN   = Math.max(6, Math.min(rx, ry) * 0.10);
+  const TICK_GAP   = Math.max(4, Math.min(rx, ry) * 0.06);
+  for (let i = 0; i < TICK_COUNT; i++) {
+    const t = (2 * Math.PI * i) / TICK_COUNT;
+    const c = Math.cos(t), s = Math.sin(t);
+    const x1 = cx + (rx + TICK_GAP) * c;
+    const y1 = cy + (ry + TICK_GAP) * s;
+    const x2 = cx + (rx + TICK_GAP + TICK_LEN) * c;
+    const y2 = cy + (ry + TICK_GAP + TICK_LEN) * s;
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    tickMarksGroup.appendChild(line);
+  }
+
+  // Mask cutout (the "see through" hole in the dark veil)
+  maskOverlay.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  maskOverlay.style.width = W + 'px';
+  maskOverlay.style.height = H + 'px';
+  bboxCutout.setAttribute('cx', cx);
+  bboxCutout.setAttribute('cy', cy);
+  bboxCutout.setAttribute('rx', rx);
+  bboxCutout.setAttribute('ry', ry);
+
+  // Matrix grid sits over the bbox rect; the CSS clip-path keeps it inside
+  // the ellipse so the 3 thirds appear inside the face circle.
+  matrixGrid.style.left = x + 'px';
+  matrixGrid.style.top = y + 'px';
+  matrixGrid.style.width = w + 'px';
+  matrixGrid.style.height = h + 'px';
+
+  // Green-check badge: pin to bottom-right of the ellipse boundary
+  const checkAngle = Math.PI / 4;  // 45° below horizontal axis (lower-right)
+  const checkX = cx + rx * Math.cos(checkAngle);
+  const checkY = cy + ry * Math.sin(checkAngle);
+  qualityCheckEl.style.left = checkX + 'px';
+  qualityCheckEl.style.top = checkY + 'px';
+}
+
+function resetVerifyFlow() {
+  bboxOverlay.classList.remove('shown');
+  maskOverlay.classList.remove('shown');
+  qualityCheckEl.classList.remove('shown');
+  topMessage.classList.remove('shown');
+  probeBanner.classList.remove('shown');
+  probeProgress.classList.remove('shown');
+  matrixGrid.classList.remove('shown');
+  matrixThirds.forEach(t => {
+    t.classList.remove('filled', 'failed');
+    t.textContent = '';
+    t.style.display = '';  // restore default; runtime sets display:none for unused thirds
+  });
+  sendingOverlay.classList.remove('shown');
+  finalOverlay.classList.remove('shown', 'success', 'failure');
+  document.getElementById('probe-overlay').classList.remove('shown');
+  stageTitle.style.display = '';
+  clearElapsedTime();
+  // Reset the mask color so a re-run of Stage A starts on the dark default
+  document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+  // The bbox/tick fade-in animations re-fire next time .shown is added because
+  // we just removed it; no DOM cloning needed with the new fade-in approach.
+}
+
+// Background helper: runs the full probe sequence (sampling + slot loop +
+// post-buffer). Mutates `phases` in place. Updates the matrix thirds and
+// progress bar as each slot completes. Resolves when sampling stops.
+async function runProbeSequence(challenge, phases) {
+  const colorMap = { R: '#ff2828', G: '#28ff28', B: '#2828ff' };
+  startProbeSampling();
+  await sleep(challenge.prefix_ms);
+
+  document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+  const baseStart = performance.now() - probeSamplingStart;
+  await sleep(challenge.baseline_ms);
+  phases.push({ kind: 'baseline_pre', color: 'gray', start: baseStart, end: performance.now() - probeSamplingStart });
+
+  for (let i = 0; i < challenge.sequence.length; i++) {
+    const slot = challenge.sequence[i];
+    const fillColor = slot.render || colorMap[slot.color];
+    document.documentElement.style.setProperty('--mask-fill', fillColor);
+
+    const slotStart = performance.now() - probeSamplingStart;
+    await sleep(challenge.slot_ms);
+    phases.push({ kind: 'flash', color: slot.color, start: slotStart, end: performance.now() - probeSamplingStart });
+
+    matrixThirds[i].textContent = randomMatrixBlock();
+    matrixThirds[i].classList.add('filled');
+    const pct = Math.round(((i + 1) / challenge.sequence.length) * 100);
+    setProbeProgress(pct, `Vectorizing face — ${pct}% done`);
+
+    document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+    const restStart = performance.now() - probeSamplingStart;
+    await sleep(challenge.baseline_ms);
+    phases.push({ kind: 'baseline', color: 'gray', start: restStart, end: performance.now() - probeSamplingStart });
+  }
+
+  await sleep(challenge.post_buffer_ms || 200);
+  stopProbeSampling();
+}
+
+async function startVerify() {
+  resetVerifyFlow();
+  resultEl.style.display = 'none';
+  verifyBtn.disabled = true;
+  verifyWinkOnlyBtn.disabled = true;
+  gapBtn.disabled = true; guardedBtn.disabled = true; stackedBtn.disabled = true;
+  verifyBtn.textContent = 'Checking…';
+
+  let midProbeSwitch1 = null;
+  let midProbeSwitch2 = null;
+  let t_qaCheckShown = null;
+  let probeRunPromise = null;
+  let winkPromise = null;
+  let probeChallenge = null;
+  let phases = [];
+
+  try {
+    // ─ Stage A: position guidance + parallel probe kickoff ─
+    setBboxFromRel(TARGET_BBOX_REL);
+    document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+    stageTitle.style.display = 'none';
+    bboxOverlay.classList.add('shown');
+    maskOverlay.classList.add('shown');
+    topMessage.textContent = 'Position your face inside the circle';
+    topMessage.classList.add('shown');
+
+    // Pre-fetch the probe challenge in parallel with Stage A polling — usually
+    // resolves long before the user gets their first good frame, so when we
+    // do fire the probe it's instant.
+    const challengePromise = fetch('/api/probe-challenge', { method: 'POST' })
+      .then(r => r.json())
+      .catch(err => null);
+
+    const REQUIRED_GOOD = 4;
+    const POLL_INTERVAL_MS = 280;
+    const TIMEOUT_MS = 18000;
+    let goodFrames = 0;
+    let lastQ = null;
+    let lastSnap = null;
+    const stageStart = performance.now();
+
+    while (goodFrames < REQUIRED_GOOD && (performance.now() - stageStart) < TIMEOUT_MS) {
+      const snap = await snapCanvasJpeg();
+      const fd = new FormData();
+      fd.append('image', snap, 'snap.jpg');
+      let q;
+      try {
+        const qResp = await fetch('/api/face-quality', { method: 'POST', body: fd });
+        q = await qResp.json();
+      } catch (netErr) {
+        if (probeRunPromise === null) topMessage.textContent = 'Connection error — retrying';
+        await sleep(500);
+        continue;
+      }
+      const guidance = computeGuidance(q);
+      // Only update position-guidance text while the probe hasn't started —
+      // once it has, the banner takes over.
+      if (probeRunPromise === null) topMessage.textContent = guidance.message;
+
+      if (guidance.good) {
+        goodFrames++;
+        lastSnap = snap;
+        lastQ = q;
+        // Only update verifyBbox while the probe hasn't started. Once it has,
+        // the client-side sampler is reading L/R sub-regions at 30fps relative
+        // to this bbox; letting it shift mid-probe (even by a few pixels from
+        // mediapipe re-locks) corrupts the per-channel deltas and produces the
+        // huge L/R asymmetry that flunks slot 1.
+        if (probeRunPromise === null) verifyBbox = lastQ.bbox;
+
+        // THIRD GOOD FRAME — fire Wink + start probe in background while
+        // Stage A keeps polling for the remaining good frame. We wait three
+        // polls (not one or two): the bbox lock alone isn't enough — the
+        // camera's auto-exposure/WB is still actively compensating after
+        // only one or two good frames, dampening the flash deltas to near
+        // the dominance-margin threshold. Three polls gives the camera
+        // enough time to settle so flash reflections register at full
+        // amplitude.
+        if (goodFrames === 3 && probeRunPromise === null) {
+          verifySnapshot = lastSnap;
+
+          try {
+            const faceCrop = await cropSnapshotWithBbox(verifySnapshot, verifyBbox);
+            const fdWink = new FormData();
+            fdWink.append('face_jpeg', faceCrop, 'face.jpg');
+            winkPromise = fetch('/api/wink-recognize', { method: 'POST', body: fdWink })
+              .then(r => r.json())
+              .catch(err => ({ error: 'wink network: ' + (err.message || err) }));
+          } catch (cropErr) {
+            winkPromise = Promise.resolve({ error: 'snapshot crop failed: ' + cropErr.message });
+          }
+
+          probeChallenge = await challengePromise;
+          if (!probeChallenge) {
+            showFailure('Verification Failed', 'Could not get probe challenge from server');
+            return;
+          }
+
+          // Hide position guidance, show banner + progress (parallel-stage UX
+          // signals that the user should now hold still while we keep
+          // double-checking position via face-quality polling).
+          topMessage.classList.remove('shown');
+          setProbeBanner('Please hold still', false);
+          probeBanner.classList.add('shown');
+          midProbeSwitch1 = setTimeout(() => setProbeBanner('Keep holding — verifying identity', false), 1000);
+          midProbeSwitch2 = setTimeout(() => setProbeBanner('Keep still — receiving response', true), 2500);
+          setProbeProgress(0, 'Vectorizing face');
+          probeProgress.classList.add('shown');
+          matrixThirds.forEach((t, i) => {
+            t.style.display = i < probeChallenge.sequence.length ? '' : 'none';
+          });
+          matrixGrid.classList.add('shown');
+
+          // Run the probe sequence in the background; we await it after Stage A.
+          probeRunPromise = runProbeSequence(probeChallenge, phases);
+        }
+      } else {
+        goodFrames = 0;
+      }
+      if (goodFrames < REQUIRED_GOOD) {
+        await sleep(POLL_INTERVAL_MS);
+      }
+    }
+
+    if (!lastQ || !lastSnap || goodFrames < REQUIRED_GOOD) {
+      // Stage A timed out — clean up the probe if it had started.
+      if (probeRunPromise) {
+        stopProbeSampling();
+        document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+        probeBanner.classList.remove('shown');
+        probeProgress.classList.remove('shown');
+        if (midProbeSwitch1) clearTimeout(midProbeSwitch1);
+        if (midProbeSwitch2) clearTimeout(midProbeSwitch2);
+      }
+      showFailure('Verification Failed',
+                  'Could not get a stable face capture — try again with better positioning');
+      return;
+    }
+
+    // Stage A passed (4 good frames). Show green check briefly; probe
+    // continues running in the background.
+    qualityCheckEl.classList.add('shown');
+    t_qaCheckShown = performance.now();
+
+    // Wait for the probe to finish (might already be done if user positioned
+    // quickly, or still finishing the last slot).
+    await probeRunPromise;
+
+    // Tear down probe UI
+    qualityCheckEl.classList.remove('shown');
+    document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+    probeBanner.classList.remove('shown');
+    probeProgress.classList.remove('shown');
+    if (midProbeSwitch1) clearTimeout(midProbeSwitch1);
+    if (midProbeSwitch2) clearTimeout(midProbeSwitch2);
+
+    // Client-side analysis (instant)
+    const probeVerdict = clientProbeVerdict(probeSamples, phases, probeChallenge.sequence);
+
+    // Wait for Wink (almost certainly already resolved)
+    const winkResp = await winkPromise;
+
+    const data = {
+      stage:       probeVerdict.pass ? 'wink' : 'probe',
+      verdict:     !probeVerdict.pass ? 'BLOCKED_BY_SCREEN_PROBE' :
+                   (winkResp && winkResp.error) ? 'WINK_ERROR' :
+                                                  'FORWARDED_TO_WINK',
+      quality:     { pass: true },
+      rppg:        null,
+      probe:       probeVerdict,
+      http_status: winkResp ? winkResp.http_status : undefined,
+      session_id:  winkResp ? winkResp.session_id  : undefined,
+      wink:        winkResp ? winkResp.wink        : undefined,
+      wink_called: !!(winkResp && winkResp.wink),
+    };
+
+    try { renderStackedResult(data); } catch (_) {}
+
+    // Reveal animation on probe failure
+    const probe = data.probe;
+    const probeFailedOverall = probe && probe.pass === false;
+    if (probeFailedOverall && Array.isArray(probe.flashes)) {
+      for (let i = 0; i < probe.flashes.length && i < matrixThirds.length; i++) {
+        const f = probe.flashes[i];
+        const isPass = (f.is_pass !== undefined ? f.is_pass : f.is_dominant);
+        if (!isPass) {
+          const third = matrixThirds[i];
+          third.classList.remove('filled');
+          third.textContent = '';
+          third.classList.add('failed');
+          await sleep(260);
+        }
+      }
+    }
+    await sleep(500);
+
+    // Final banner + elapsed time
+    if (t_qaCheckShown != null) {
+      const elapsedMs = Math.round(performance.now() - t_qaCheckShown);
+      showElapsedTime(elapsedMs, 'Verify Identity (with screen probe)');
+    }
+    const fr = (data.wink || {}).faceResponse || {};
+    if (data.verdict === 'BLOCKED_BY_SCREEN_PROBE') {
+      showFailure('Verification Failed', 'Liveness check rejected the capture');
+    } else if (data.wink_called && fr.livenessPass === true) {
+      showSuccess();
+    } else if (data.wink_called && fr.livenessPass === false) {
+      showFailure('Verification Failed', 'Wink rejected the frame');
+    } else {
+      showFailure('Verification Failed', (data.error || data.verdict || 'Unknown error'));
+    }
+  } catch (e) {
+    probeBanner.classList.remove('shown');
+    probeProgress.classList.remove('shown');
+    stopProbeSampling();
+    if (midProbeSwitch1) clearTimeout(midProbeSwitch1);
+    if (midProbeSwitch2) clearTimeout(midProbeSwitch2);
+    document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+    showFailure('Verification Failed', e.message);
+  } finally {
+    verifyBtn.disabled = false;
+    verifyWinkOnlyBtn.disabled = false;
+    gapBtn.disabled = false; guardedBtn.disabled = false; stackedBtn.disabled = false;
+    verifyBtn.textContent = 'Verify Identity';
+  }
+}
+
+// ─── Wink-only flow (Stage A + Stage C, no probe) — for the gap demo ────
+async function startVerifyWinkOnly() {
+  resetVerifyFlow();
+  resultEl.style.display = 'none';
+  verifyBtn.disabled = true;
+  verifyWinkOnlyBtn.disabled = true;
+  gapBtn.disabled = true; guardedBtn.disabled = true; stackedBtn.disabled = true;
+  verifyWinkOnlyBtn.textContent = 'Checking…';
+
+  let t_qaCheckShown = null;
+
+  try {
+    // ─ Stage A (identical to startVerify) ─
+    setBboxFromRel(TARGET_BBOX_REL);
+    document.documentElement.style.setProperty('--mask-fill', 'rgba(0,0,0,0.96)');
+    stageTitle.style.display = 'none';
+    bboxOverlay.classList.add('shown');
+    maskOverlay.classList.add('shown');
+    topMessage.textContent = 'Position your face inside the circle';
+    topMessage.classList.add('shown');
+
+    const REQUIRED_GOOD = 4;
+    const POLL_INTERVAL_MS = 280;
+    const TIMEOUT_MS = 18000;
+    let goodFrames = 0;
+    let lastQ = null;
+    let lastSnap = null;
+    const stageStart = performance.now();
+
+    while (goodFrames < REQUIRED_GOOD && (performance.now() - stageStart) < TIMEOUT_MS) {
+      const snap = await snapCanvasJpeg();
+      const fd = new FormData();
+      fd.append('image', snap, 'snap.jpg');
+      let q;
+      try {
+        const qResp = await fetch('/api/face-quality', { method: 'POST', body: fd });
+        q = await qResp.json();
+      } catch (netErr) {
+        topMessage.textContent = 'Connection error — retrying';
+        await sleep(500);
+        continue;
+      }
+      const guidance = computeGuidance(q);
+      topMessage.textContent = guidance.message;
+      if (guidance.good) {
+        goodFrames++;
+        lastSnap = snap;
+        lastQ = q;
+      } else {
+        goodFrames = 0;
+      }
+      if (goodFrames < REQUIRED_GOOD) {
+        await sleep(POLL_INTERVAL_MS);
+      }
+    }
+
+    if (!lastQ || !lastSnap) {
+      showFailure('Verification Failed',
+                  'Could not get a stable face capture — try again with better positioning');
+      return;
+    }
+
+    verifySnapshot = lastSnap;
+    verifyBbox = lastQ.bbox;
+    qualityCheckEl.classList.add('shown');
+    t_qaCheckShown = performance.now();
+    topMessage.classList.remove('shown');
+    await sleep(1100);
+
+    // ─ Skip Stage B. Go straight to Wink. ─
+    qualityCheckEl.classList.remove('shown');
+    setProbeBanner('Calling Wink', true);
+    probeBanner.classList.add('shown');
+
+    const faceCrop = await cropSnapshotWithBbox(verifySnapshot, verifyBbox);
+    const fdWink = new FormData();
+    fdWink.append('face_jpeg', faceCrop, 'face.jpg');
+    const winkResp = await fetch('/api/wink-recognize', { method: 'POST', body: fdWink })
+      .then(r => r.json())
+      .catch(err => ({ error: 'wink network: ' + (err.message || err) }));
+
+    probeBanner.classList.remove('shown');
+
+    // Synthesize the data shape renderStackedResult expects. Stage A
+    // already passed by the time we got here (otherwise we'd have
+    // returned a failure), so mark quality as passed for the renderer.
+    const data = {
+      ...winkResp,
+      wink: winkResp.wink,
+      wink_called: !!winkResp.wink,
+      verdict: winkResp.error ? 'WINK_ERROR' : 'WINK_ONLY',
+      probe: null,
+      quality: { pass: true },
+    };
+    try { renderStackedResult(data); } catch (_) {}
+
+    // Elapsed time + final
+    if (t_qaCheckShown != null) {
+      const elapsedMs = Math.round(performance.now() - t_qaCheckShown);
+      showElapsedTime(elapsedMs, 'Wink Only — no liveness probe');
+    }
+
+    const fr = (data.wink || {}).faceResponse || {};
+    if (data.wink_called && fr.livenessPass === true) {
+      showSuccess();
+    } else if (data.wink_called && fr.livenessPass === false) {
+      showFailure('Verification Failed', 'Wink rejected the frame');
+    } else {
+      showFailure('Verification Failed', (data.error || 'Unknown error'));
+    }
+  } catch (e) {
+    probeBanner.classList.remove('shown');
+    showFailure('Verification Failed', e.message);
+  } finally {
+    verifyBtn.disabled = false;
+    verifyWinkOnlyBtn.disabled = false;
+    gapBtn.disabled = false; guardedBtn.disabled = false; stackedBtn.disabled = false;
+    verifyWinkOnlyBtn.textContent = 'Wink Only (no liveness probe)';
+  }
+}
+
+function showSuccess() {
+  finalGlyph.textContent = '✓';
+  finalHeadline.textContent = 'Verification Successful';
+  finalDetail.textContent = 'Identity verified — welcome back';
+  finalOverlay.classList.add('shown', 'success');
+}
+
+function showFailure(headline, detail) {
+  finalGlyph.textContent = '✕';
+  finalHeadline.textContent = headline;
+  finalDetail.textContent = detail || '';
+  finalOverlay.classList.add('shown', 'failure');
+}
+
+finalDismiss.addEventListener('click', resetVerifyFlow);
+verifyBtn.addEventListener('click', startVerify);
+verifyWinkOnlyBtn.addEventListener('click', startVerifyWinkOnly);
+
+/* -------------- Fakecam top-right controls --------------
+   We can't shell out from a web page, and on modern macOS (Sequoia+)
+   downloaded shell scripts get aggressively blocked by Gatekeeper with
+   no easy "right-click → Open" path anymore. So instead of forcing a
+   download, both buttons open a modal with a copy-paste command.
+
+   Setup (macOS):     curl|bash one-liner — no file lands on disk, no
+                      Gatekeeper, runs cleanly in Terminal.
+   Setup (Windows):   downloads .bat (SmartScreen warning on first run
+                      is one extra click — unavoidable but not a wall).
+   Launch (any OS):   tells the user the path to the LOCAL launcher that
+                      Setup placed in ~/wink-fakecam/ (or %USERPROFILE%
+                      \wink-fakecam\). That file was fetched via curl by
+                      Setup, so it has no quarantine attribute and runs
+                      with no Gatekeeper / SmartScreen prompt.
+*/
+(function setupFakecamControls() {
+  const osBadge   = document.getElementById('fakecam-os-badge');
+  const setupBtn  = document.getElementById('setup-fakecam-btn');
+  const launchBtn = document.getElementById('launch-fakecam-btn');
+  const controls  = document.getElementById('fakecam-controls');
+  const modalBg   = document.getElementById('fakecam-modal-bg');
+  const modalTitle= document.getElementById('fakecam-modal-title');
+  const modalBody = document.getElementById('fakecam-modal-body');
+  const modalClose= document.getElementById('fakecam-modal-close');
+
+  const ua = navigator.userAgent.toLowerCase();
+  const platform = (navigator.platform || '').toLowerCase();
+  const isMobile = /iphone|ipad|ipod|android/.test(ua);
+  const isMac    = !isMobile && (/mac/.test(platform) || /macintosh/.test(ua));
+  const isWin    = !isMobile && /win/.test(platform);
+
+  if (isMobile) {
+    controls.style.display = 'none';
+    return;
+  }
+
+  const ORIGIN = window.location.origin;
+  const HOME_DIR = isMac ? '~/wink-fakecam' : '%USERPROFILE%\\wink-fakecam';
+  const LAUNCH_NAME = isMac ? 'launch-fakecam.command' : 'launch-fakecam.bat';
+  const REVEAL_CMD = isMac ? `open ${HOME_DIR}` : `explorer ${HOME_DIR}`;
+
+  osBadge.textContent = isMac ? 'macOS' : isWin ? 'Windows' : 'Linux';
+
+  // ---- Modal helpers -------------------------------------------------
+  function showModal(title, htmlBody) {
+    modalTitle.textContent = title;
+    modalBody.innerHTML = htmlBody;
+    modalBg.classList.add('shown');
+    // Wire up any Copy buttons that the body added.
+    modalBody.querySelectorAll('.cmd button[data-copy]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.copy);
+          btn.textContent = 'Copied!';
+          btn.classList.add('copied');
+          setTimeout(() => {
+            btn.textContent = 'Copy';
+            btn.classList.remove('copied');
+          }, 1500);
+        } catch (e) {
+          btn.textContent = 'Copy failed';
+        }
+      });
+    });
+  }
+  function closeModal() { modalBg.classList.remove('shown'); }
+  modalClose.addEventListener('click', closeModal);
+  modalBg.addEventListener('click', (e) => {
+    if (e.target === modalBg) closeModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // ---- Helper: render a copy-able command block ----------------------
+  function cmdBlock(cmd) {
+    return `<div class="cmd"><code>${escapeHtml(cmd)}</code><button data-copy="${escapeAttr(cmd)}">Copy</button></div>`;
+  }
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escapeAttr(s) {
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  }
+
+  // ---- Setup button --------------------------------------------------
+  setupBtn.addEventListener('click', () => {
+    if (isMac) {
+      // Sequoia Gatekeeper blocks downloaded .command files hard. The
+      // curl|bash pattern dodges Gatekeeper because no file is written
+      // to disk before execution.
+      const oneliner = `curl -fsSL ${ORIGIN}/launcher/setup-fakecam.command | bash`;
+      showModal('Setup Fakecam (macOS)', `
+        <div class="step">Open <strong>Terminal</strong> (Spotlight: Cmd+Space, type "Terminal"), paste this command, press Enter:</div>
+        ${cmdBlock(oneliner)}
+        <div class="note">This installs ffmpeg via Homebrew, downloads the sample Virat video, pre-converts it for Chrome, and drops a launcher at <code>~/wink-fakecam/launch-fakecam.command</code>.</div>
+        <div class="note">Why Terminal instead of double-click? macOS Sequoia's Gatekeeper blocks downloaded shell scripts with no easy override. Piping curl into bash dodges it because no file lands on disk before running.</div>
+      `);
+    } else if (isWin) {
+      // Windows just gets the SmartScreen "More info → Run anyway"
+      // popup once — much friendlier than Sequoia. Stick with download.
+      const a = document.createElement('a');
+      a.href = '/launcher/setup-fakecam.bat';
+      a.download = 'setup-fakecam.bat';
+      document.body.appendChild(a); a.click(); a.remove();
+      showModal('Setup Fakecam (Windows)', `
+        <div class="step">Downloading <code>setup-fakecam.bat</code>…</div>
+        <div class="step">Find it in Downloads, double-click to run.</div>
+        <div class="step">SmartScreen may warn the first time — click <strong>More info → Run anyway</strong>.</div>
+        <div class="note">Setup downloads ffmpeg + the sample video and drops a launcher at <code>%USERPROFILE%\\wink-fakecam\\launch-fakecam.bat</code>.</div>
+      `);
+    } else {
+      // Linux — same curl|bash works.
+      const oneliner = `curl -fsSL ${ORIGIN}/launcher/setup-fakecam.command | bash`;
+      showModal('Setup Fakecam (Linux)', `
+        <div class="step">Paste this in a terminal (you'll need ffmpeg + chromium installed via your package manager):</div>
+        ${cmdBlock(oneliner)}
+      `);
+    }
+  });
+
+  // ---- Launch button -------------------------------------------------
+  launchBtn.addEventListener('click', () => {
+    const localPath = `${HOME_DIR}/${LAUNCH_NAME}`.replace('/', isMac ? '/' : '\\');
+    showModal('Launch Fakecam', `
+      <div class="step">Setup placed a clean launcher on your machine. To run an attack:</div>
+      <div class="step"><strong>Double-click</strong> this file:</div>
+      ${cmdBlock(`${HOME_DIR}${isMac ? '/' : '\\\\'}${LAUNCH_NAME}`)}
+      <div class="step">Or open the folder in ${isMac ? 'Finder' : 'Explorer'}:</div>
+      ${cmdBlock(REVEAL_CMD)}
+      <div class="note">No Gatekeeper / SmartScreen prompt — Setup downloaded this file via curl, so it never picked up the quarantine attribute.</div>
+      <div class="note">Haven't run Setup yet? Click <strong>⚙ Setup Fakecam</strong> first.</div>
+    `);
+  });
+})();
+
+const devToggle = document.getElementById('dev-tools-toggle');
+const devTools = document.getElementById('dev-tools');
+devToggle.addEventListener('click', () => {
+  devTools.classList.toggle('shown');
+  devToggle.textContent = devTools.classList.contains('shown')
+    ? '▾ hide diagnostic flows'
+    : '▸ show diagnostic flows';
+});
+
+startCamera();
+</script>
+</body>
+</html>
